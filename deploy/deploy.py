@@ -1,10 +1,13 @@
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from interface_protocol.msg import ImuInfo, JointState, JointCommand
 import torch
 import numpy as np
 import math
 import time
+from scipy.signal import firwin
+
 
 joint_names = [
     "j00_hip_pitch_l", "j01_hip_roll_l", "j02_hip_yaw_l", "j03_knee_pitch_l", "j04_ankle_pitch_l", "j05_ankle_roll_l",
@@ -25,6 +28,34 @@ default_offset = [-0.2, 0.0, 0.0, 0.45, -0.2, 0.0,
                   0.0, -0.3, 0.0, 0.0, 0.0,
                   0.0]
 
+b = firwin(numtaps=21, cutoff=6.0, fs=200.0, pass_zero="lowpass")
+
+class FIRFilter:
+    def __init__(self, b, dim):
+        """
+        b  : FIR 系数，一维数组
+        dim: 信号维度，比如 24（joint_pos_nn），3（w_real/euler_xyz）
+        """
+        self.b = np.asarray(b, dtype=float)
+        self.dim = dim
+        self.M = len(self.b)
+        # 保存最近 M 个输入样本
+        self.buf = np.zeros((self.M, self.dim), dtype=float)
+
+    def filter(self, x):
+        """
+        输入一帧 x (dim,)，输出一帧 y (dim,)，适合在读每行时调用。
+        """
+        x = np.asarray(x, dtype=float).reshape(1, self.dim)
+
+        # 滚动缓冲区：往后挪一格，把新数据放到 buf[0]
+        self.buf = np.roll(self.buf, 1, axis=0)
+        self.buf[0] = x
+
+        # FIR 卷积：沿着时间维做加权和
+        # y = sum_k b[k] * buf[k]
+        y = np.tensordot(self.b, self.buf, axes=(0, 0))  # (dim,)
+        return y
 
 class PolicyInferenceNode(Node):
     def __init__(self):
@@ -36,13 +67,32 @@ class PolicyInferenceNode(Node):
         self.policy = torch.jit.load(checkpoint_path, map_location=self.device)
         self.policy.eval().to(self.device)
         self.get_logger().info("Loaded TorchScript policy model")
+        self.action_filter = FIRFilter(b, dim=24)
+        self.imu_filter = FIRFilter(b, dim=3)
 
         # ======== ROS2 订阅 ========
-        self.sub_imu = self.create_subscription(ImuInfo, '/hardware/imu_info', self.imu_callback, 10)
-        self.sub_joint = self.create_subscription(JointState, '/hardware/joint_state', self.joint_callback, 10)
+        imu_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,  # 发布者使用的是 depth=1
+            durability=DurabilityPolicy.VOLATILE
+        )
+        
+        joint_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,  # 发布者使用的是 depth=1
+            durability=DurabilityPolicy.VOLATILE
+        )
+        self.sub_imu = self.create_subscription(ImuInfo, '/hardware/imu_info', self.imu_callback, imu_qos)
+        self.sub_joint = self.create_subscription(JointState, '/hardware/joint_state', self.joint_callback, joint_qos)
 
         # ======== 发布 joint_command ========
-        self.pub_cmd = self.create_publisher(JointCommand, '/hardware/joint_command', 10)
+        cmd_qos = QoSProfile(
+            depth=10,  # 控制命令可以设置更大的深度
+            reliability=ReliabilityPolicy.BEST_EFFORT
+        )
+        self.pub_cmd = self.create_publisher(JointCommand, '/hardware/joint_command', cmd_qos)
 
         # ======== 状态存储 ========
         self.imu_data = None
@@ -56,7 +106,7 @@ class PolicyInferenceNode(Node):
         # ======== 控制循环（100 Hz） ========
         self.timer = self.create_timer(0.005, self.update)
 
-        self.get_logger().info("Policy inference node started, 100 Hz")
+        self.get_logger().info("Policy inference node started, 200 Hz")
 
         self.ros_to_nn_map = nn_input_sequence
         self.nn_to_ros_map = [self.ros_to_nn_map.index(i) for i in range(len(self.ros_to_nn_map))]
@@ -116,7 +166,7 @@ class PolicyInferenceNode(Node):
 
         # ========== 拼接 observation ==========
         obs = np.concatenate([
-            w_real,
+            self.imu_filter.filter(w_real),
             euler_xyz,
             joint_pos_nn,
             joint_vel_nn,
@@ -125,8 +175,14 @@ class PolicyInferenceNode(Node):
             commands,
         ])
         assert obs.shape[0] == 59, f"Observation size mismatch: {obs.shape}"
-        #print('w_real:', w_real)
-        #print('euler_xyz:', euler_xyz)
+        print('w_real:', w_real)
+        print('euler_xyz:', euler_xyz)
+        print('joint_pos_nn', joint_pos_nn)
+        print('joint_vel_nn', joint_vel_nn)
+        print('phase_sin', phase_sin)
+        print('phase_cos', phase_cos)
+        print('commands', commands)
+
 
 
         # ========== 转 Tensor 推理 ==========
@@ -135,6 +191,7 @@ class PolicyInferenceNode(Node):
             action = self.policy(x)
         action = action.squeeze(0).cpu().numpy()
         action_ros = action[self.nn_to_ros_map] + np.array(default_offset)
+        action_ros = self.action_filter.filter(action_ros)
         print('action_ros:', action_ros)
 
         # ========== 生成 JointCommand ==========
