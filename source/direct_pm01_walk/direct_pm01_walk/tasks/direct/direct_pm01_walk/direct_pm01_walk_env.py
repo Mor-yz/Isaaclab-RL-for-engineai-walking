@@ -89,13 +89,49 @@ class TorchFIRFilter:
 
         return y
 
+class BatchTorchFIRFilter:
+    def __init__(self, b, num_envs, dim, device=None, dtype=torch.float32):
+        b = torch.as_tensor(b, dtype=dtype)
+        self.b = b.to(device)                   # (M,)
+        self.M = b.numel()
+        self.dim = dim
+        self.num_envs = num_envs
+        self.device = device if device is not None else b.device
+        self.dtype = dtype
+
+        # buf: (M, num_envs, dim)
+        self.buf = torch.zeros((self.M, num_envs, dim),
+                               device=self.device, dtype=self.dtype)
+
+    @torch.no_grad()
+    def filter(self, x):
+        """
+        x: (num_envs, dim)
+        return: (num_envs, dim)
+        """
+
+        # 1. roll time dimension
+        self.buf = torch.roll(self.buf, shifts=1, dims=0)
+
+        # 2. write newest frame at buf[0]
+        self.buf[0] = x
+
+        # 3. FIR convolution
+        # (M,) → (M,1,1)
+        # (M, num_envs, dim)
+        y = (self.b[:, None, None] * self.buf).sum(dim=0)  # (num_envs, dim)
+        return y
+
+    def reset_env(self, env_ids):
+        self.buf[:, env_ids, :] = 0.0
+
 class DirectPm01WalkEnv(DirectRLEnv):
     cfg: DirectPm01WalkEnvCfg
 
     def __init__(self, cfg: DirectPm01WalkEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
         
-        print("Available sensors:", list(self.scene.sensors.keys()))
+        #print("Available sensors:", list(self.scene.sensors.keys()))
 
 
         self.default_joint_pos = self.robot.data.default_joint_pos.clone()
@@ -144,14 +180,21 @@ class DirectPm01WalkEnv(DirectRLEnv):
         print(self.robot.has_debug_vis_implementation)
 
         # filters
-        self.base_ang_vel_filters = [
-            TorchFIRFilter(b, dim=3, device=self.device)
-            for _ in range(self.num_envs)
-        ]
-        self.action_filters = [
-            TorchFIRFilter(b, dim=24, device=self.device)
-            for _ in range(self.num_envs)
-        ]
+        # self.base_ang_vel_filters = [
+        #     TorchFIRFilter(b, dim=3, device=self.device)
+        #     for _ in range(self.num_envs)
+        # ]
+        # self.action_filters = [
+        #     TorchFIRFilter(b, dim=24, device=self.device)
+        #     for _ in range(self.num_envs)
+        # ]
+        self.base_ang_vel_filter = BatchTorchFIRFilter(
+            b, num_envs=self.num_envs, dim=3, device=self.device
+        )
+
+        self.action_filter = BatchTorchFIRFilter(
+            b, num_envs=self.num_envs, dim=24, device=self.device
+        )
 
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.scene.robot)
@@ -251,13 +294,15 @@ class DirectPm01WalkEnv(DirectRLEnv):
         action_scale = 1.0
         joint_target = self.default_joint_pos + self.actions * action_scale
 
-        action_filtered = []
-        for env_id in range(self.num_envs):
-            xf = self.action_filters[env_id].filter(joint_target[env_id])
-            action_filtered.append(xf)
-        action_filtered = torch.stack(action_filtered)   # (num_envs, 3)
+        # action_filtered = []
+        # for env_id in range(self.num_envs):
+        #     xf = self.action_filters[env_id].filter(joint_target[env_id])
+        #     action_filtered.append(xf)
+        # action_filtered = torch.stack(action_filtered)   # (num_envs, 3)
+        action_filtered = self.action_filter.filter(joint_target)
 
-        print('action: %.4f'% action_filtered[0][0].item())
+        print('action: %.4f'% joint_target[0][0].item())
+        print('action filtered: %.4f'% action_filtered[0][0].item())
         self.robot.set_joint_position_target(action_filtered)
 
 
@@ -276,11 +321,12 @@ class DirectPm01WalkEnv(DirectRLEnv):
         phase_sin = torch.sin(self.gait_phase).unsqueeze(-1)
         phase_cos = torch.cos(self.gait_phase).unsqueeze(-1)
 
-        base_ang_vel_filtered = []
-        for env_id in range(self.num_envs):
-            xf = self.base_ang_vel_filters[env_id].filter(base_ang_vel[env_id])
-            base_ang_vel_filtered.append(xf)
-        base_ang_vel_filtered = torch.stack(base_ang_vel_filtered)   # (num_envs, 3)
+        # base_ang_vel_filtered = []
+        # for env_id in range(self.num_envs):
+        #     xf = self.base_ang_vel_filters[env_id].filter(base_ang_vel[env_id])
+        #     base_ang_vel_filtered.append(xf)
+        # base_ang_vel_filtered = torch.stack(base_ang_vel_filtered)   # (num_envs, 3)
+        base_ang_vel_filtered = self.base_ang_vel_filter.filter(base_ang_vel)
 
         obs = torch.cat(
             [
@@ -512,9 +558,11 @@ class DirectPm01WalkEnv(DirectRLEnv):
         self._sample_commands(env_ids)
 
         #reset fir filters
-        for env_id in env_ids:
-            self.base_ang_vel_filters[env_id].buf[:] = 0.0
-            self.action_filters[env_id].buf[:] = 0.0
+        # for env_id in env_ids:
+        #     self.base_ang_vel_filters[env_id].buf[:] = 0.0
+        #     self.action_filters[env_id].buf[:] = 0.0
+        self.base_ang_vel_filter.reset_env(env_ids)
+        self.action_filter.reset_env(env_ids)
 
     def _sample_commands(self, env_ids: Sequence[int] | torch.Tensor | None) -> None:
         """为指定环境采样新的行走指令。"""
