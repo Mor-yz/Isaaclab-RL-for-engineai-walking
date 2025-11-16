@@ -18,9 +18,76 @@ from isaaclab.utils.math import sample_uniform
 from .direct_pm01_walk_env_cfg import DirectPm01WalkEnvCfg
 from direct_pm01_walk.tasks.direct.direct_pm01_walk.rewards.rewards import *
 from isaaclab.utils.math import quat_apply
-from isaaclab.utils.math import quat_rotate_inverse, euler_xyz_from_quat
-   
+from isaaclab.utils.math import quat_apply_inverse, euler_xyz_from_quat
+from scipy.signal import firwin
 
+   
+b = firwin(numtaps=21, cutoff=6.0, fs=200.0, pass_zero="lowpass")
+
+class FIRFilter:
+    def __init__(self, b, dim):
+        """
+        b  : FIR 系数，一维数组
+        dim: 信号维度，比如 24（joint_pos_nn），3（w_real/euler_xyz）
+        """
+        self.b = np.asarray(b, dtype=float)
+        self.dim = dim
+        self.M = len(self.b)
+        # 保存最近 M 个输入样本
+        self.buf = np.zeros((self.M, self.dim), dtype=float)
+
+    def filter(self, x):
+        """
+        输入一帧 x (dim,)，输出一帧 y (dim,)，适合在读每行时调用。
+        """
+        x = np.asarray(x, dtype=float).reshape(1, self.dim)
+
+        # 滚动缓冲区：往后挪一格，把新数据放到 buf[0]
+        self.buf = np.roll(self.buf, 1, axis=0)
+        self.buf[0] = x
+
+        # FIR 卷积：沿着时间维做加权和
+        # y = sum_k b[k] * buf[k]
+        y = np.tensordot(self.b, self.buf, axes=(0, 0))  # (dim,)
+        return y
+
+class TorchFIRFilter:
+    def __init__(self, b, dim, device=None, dtype=torch.float32):
+        """
+        b: FIR 系数，一维 list/ndarray/tensor
+        dim: 信号维度，例如 24 (joint_pos_nn), 3 (Euler/w_real)
+        device: torch.device，例如 'cuda:0' 或 'cpu'
+        """
+        b = torch.as_tensor(b, dtype=dtype)
+        self.b = b.clone().detach().to(device)              # (M,)
+        self.M = b.numel()
+        self.dim = dim
+        self.device = device if device is not None else b.device
+        self.dtype = dtype
+
+        # 存 M 个历史帧，每帧 dim 维，初始化为 0
+        self.buf = torch.zeros((self.M, self.dim), 
+                               device=self.device, 
+                               dtype=self.dtype)
+
+    @torch.no_grad()
+    def filter(self, x):
+        """
+        x: shape (dim,) 的一帧数据，numpy 或 tensor 都行
+        返回: 一帧 torch tensor, shape (dim,)
+        """
+        x = torch.as_tensor(x, dtype=self.dtype, device=self.device).reshape(1, self.dim)
+
+        # 将 buf 整体向后移，buf[1] <- buf[0], ..., buf[M-1] <- buf[M-2]
+        self.buf = torch.roll(self.buf, shifts=1, dims=0)
+        self.buf[0] = x
+
+        # FIR 卷积：y = sum_k b[k] * buf[k]
+        # tensordot 的 PyTorch 等价：逐元素乘，然后在时间维求和
+        # (M,) * (M, dim) → (M, dim) → sum over M → (dim,)
+        y = (self.b[:, None] * self.buf).sum(dim=0)
+
+        return y
 
 class DirectPm01WalkEnv(DirectRLEnv):
     cfg: DirectPm01WalkEnvCfg
@@ -75,6 +142,16 @@ class DirectPm01WalkEnv(DirectRLEnv):
 
         self.robot.set_debug_vis(True)
         print(self.robot.has_debug_vis_implementation)
+
+        # filters
+        self.base_ang_vel_filters = [
+            TorchFIRFilter(b, dim=3, device=self.device)
+            for _ in range(self.num_envs)
+        ]
+        self.action_filters = [
+            TorchFIRFilter(b, dim=24, device=self.device)
+            for _ in range(self.num_envs)
+        ]
 
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.scene.robot)
@@ -173,15 +250,22 @@ class DirectPm01WalkEnv(DirectRLEnv):
     def _apply_action(self) -> None:
         action_scale = 1.0
         joint_target = self.default_joint_pos + self.actions * action_scale
-        print('action: %.4f'% joint_target[0][0].item())
-        self.robot.set_joint_position_target(joint_target)
+
+        action_filtered = []
+        for env_id in range(self.num_envs):
+            xf = self.action_filters[env_id].filter(joint_target[env_id])
+            action_filtered.append(xf)
+        action_filtered = torch.stack(action_filtered)   # (num_envs, 3)
+
+        print('action: %.4f'% action_filtered[0][0].item())
+        self.robot.set_joint_position_target(action_filtered)
 
 
  
     def _get_observations(self) -> dict:
 
         base_quat = self.robot.data.root_quat_w
-        base_ang_vel = quat_rotate_inverse(base_quat, self.robot.data.root_ang_vel_w)
+        base_ang_vel = quat_apply_inverse(base_quat, self.robot.data.root_ang_vel_w)
         roll, pitch, yaw = euler_xyz_from_quat(base_quat)
         base_euler_xyz = torch.stack([roll, pitch, yaw], dim=-1)
 
@@ -192,9 +276,15 @@ class DirectPm01WalkEnv(DirectRLEnv):
         phase_sin = torch.sin(self.gait_phase).unsqueeze(-1)
         phase_cos = torch.cos(self.gait_phase).unsqueeze(-1)
 
+        base_ang_vel_filtered = []
+        for env_id in range(self.num_envs):
+            xf = self.base_ang_vel_filters[env_id].filter(base_ang_vel[env_id])
+            base_ang_vel_filtered.append(xf)
+        base_ang_vel_filtered = torch.stack(base_ang_vel_filtered)   # (num_envs, 3)
+
         obs = torch.cat(
             [
-                base_ang_vel,
+                base_ang_vel_filtered,
                 base_euler_xyz,
                 joint_pos,
                 joint_vel,
@@ -420,6 +510,11 @@ class DirectPm01WalkEnv(DirectRLEnv):
         self.gait_phase[env_ids] = sample_uniform(0.0, 2 * math.pi, (len(env_ids),), device=self.device)
 
         self._sample_commands(env_ids)
+
+        #reset fir filters
+        for env_id in env_ids:
+            self.base_ang_vel_filters[env_id].buf[:] = 0.0
+            self.action_filters[env_id].buf[:] = 0.0
 
     def _sample_commands(self, env_ids: Sequence[int] | torch.Tensor | None) -> None:
         """为指定环境采样新的行走指令。"""
