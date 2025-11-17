@@ -69,7 +69,7 @@ class DirectPm01WalkEnv(DirectRLEnv):
         self.push_force = torch.zeros(self.num_envs, 3, device=self.device)
 
         # 随机推力的范围
-        self.push_force_range = (-50.0, 50.0)       # 牛顿
+        self.push_force_range = (-10.0, 10.0)       # 牛顿
         self.push_interval_range = (1.0, 3.0)         # 两次推力间隔（秒）
         self.push_duration_range = (0.2, 0.6)         # 推力持续时间（秒）
 

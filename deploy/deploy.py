@@ -31,7 +31,7 @@ class PolicyInferenceNode(Node):
         super().__init__('policy_inference_node')
 
         # ======== 加载策略模型 ========
-        checkpoint_path = '../logs/rsl_rl/pm01_walk/2025-11-13_19-25-44/exported/policy.pt'
+        checkpoint_path = '../logs/rsl_rl/pm01_walk/2025-11-17_18-17-22/exported/policy.pt'
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.policy = torch.jit.load(checkpoint_path, map_location=self.device)
         self.policy.eval().to(self.device)
@@ -145,14 +145,21 @@ class PolicyInferenceNode(Node):
         cmd.velocity = [0.0] * 24
         cmd.torque = [0.0] * 24
         cmd.feed_forward_torque = [0.0] * 24
-        cmd.stiffness = [50.0] * 24
 
-        cmd.stiffness[4] = 15
-        cmd.stiffness[5] = 15
-        cmd.stiffness[10] = 15
-        cmd.stiffness[11] = 15
+        cmd.stiffness = [70.0, 50.0, 50.0, 70.0, 20.0, 20.0, 
+                         70.0, 50.0, 50.0, 70.0, 20.0, 20.0, 
+                         50.0,
+                         50.0, 50.0, 50.0, 50.0, 50.0,
+                         50.0, 50.0, 50.0, 50.0, 50.0,
+                         50.0 ]
 
-        cmd.damping = [5.0] * 24
+        cmd.damping = [7.0, 5.0, 5.0, 7.0, 0.2, 0.2,
+                       7.0, 5.0, 5.0, 7.0, 0.2, 0.2,
+                       5.0, 
+                       5.0, 5.0, 5.0, 5.0, 5.0, 
+                       5.0, 5.0, 5.0, 5.0, 5.0, 
+                       5.0 ]
+
         cmd.parallel_parser_type = 0
 
         self.pub_cmd.publish(cmd)
