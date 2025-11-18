@@ -5,7 +5,7 @@
 
 from isaaclab.utils import configclass
 
-from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
+from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticRecurrentCfg, RslRlPpoAlgorithmCfg
 
 
 @configclass
@@ -15,10 +15,13 @@ class PPORunnerCfg(RslRlOnPolicyRunnerCfg):
     save_interval = 50
     experiment_name = "pm01_walk"
     empirical_normalization = False
-    policy = RslRlPpoActorCriticCfg(
+    policy = RslRlPpoActorCriticRecurrentCfg(
         init_noise_std=1.0,
-        actor_hidden_dims=[512, 512, 256],
-        critic_hidden_dims=[512, 512, 256],
+        rnn_type = 'gru',
+        actor_hidden_dims=[128],
+        critic_hidden_dims=[128],
+        rnn_hidden_dim=256,
+        rnn_num_layers=3,
         activation="elu",
     )
     algorithm = RslRlPpoAlgorithmCfg(
