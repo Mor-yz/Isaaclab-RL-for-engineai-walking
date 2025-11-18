@@ -182,6 +182,11 @@ class DirectPm01WalkEnv(DirectRLEnv):
 
         base_quat = self.robot.data.root_quat_w
         base_ang_vel = quat_rotate_inverse(base_quat, self.robot.data.root_ang_vel_w)
+
+        noise_std = 1.0   # 噪声标准差，可按需要调整
+        noise = torch.randn_like(base_ang_vel) * noise_std
+        base_ang_vel = base_ang_vel + noise
+
         roll, pitch, yaw = euler_xyz_from_quat(base_quat)
         base_euler_xyz = torch.stack([roll, pitch, yaw], dim=-1)
 
