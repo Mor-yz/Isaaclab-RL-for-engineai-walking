@@ -33,8 +33,8 @@ class Pm01WalkSceneCfg(InteractiveSceneCfg):
             physics_material=sim_utils.RigidBodyMaterialCfg(
                 friction_combine_mode="multiply",
                 restitution_combine_mode="average",
-                static_friction=10.0,
-                dynamic_friction=10.0,
+                static_friction=1.0,
+                dynamic_friction=1.0,
             ),
         ),
     )
