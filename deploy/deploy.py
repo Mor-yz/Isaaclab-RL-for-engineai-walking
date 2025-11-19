@@ -62,7 +62,7 @@ class PolicyInferenceNode(Node):
         super().__init__('policy_inference_node')
 
         # ======== 加载策略模型 ========
-        checkpoint_path = '../logs/rsl_rl/pm01_walk/2025-11-14_12-34-23/exported/policy.pt'
+        checkpoint_path = '../logs/rsl_rl/pm01_walk/2025-11-17_22-50-26/exported/policy.pt'
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.policy = torch.jit.load(checkpoint_path, map_location=self.device)
         self.policy.eval().to(self.device)
@@ -162,11 +162,12 @@ class PolicyInferenceNode(Node):
         joint_vel_nn = joint_vel_ros[self.ros_to_nn_map].copy()
 
         # ========== commands 全 0 ==========
-        commands = np.array([0.0, 0.0, 0.0], dtype=np.float64)
+        commands = np.array([0.3, 0.0, -0.3], dtype=np.float64)
 
         # ========== 拼接 observation ==========
         obs = np.concatenate([
-            self.imu_filter.filter(w_real),
+            #self.imu_filter.filter(w_real),
+            w_real,
             euler_xyz,
             joint_pos_nn,
             joint_vel_nn,
@@ -191,7 +192,7 @@ class PolicyInferenceNode(Node):
             action = self.policy(x)
         action = action.squeeze(0).cpu().numpy()
         action_ros = action[self.nn_to_ros_map] + np.array(default_offset)
-        action_ros = self.action_filter.filter(action_ros)
+        #action_ros = self.action_filter.filter(action_ros)
         print('action_ros:', action_ros)
 
         # ========== 生成 JointCommand ==========
@@ -202,14 +203,21 @@ class PolicyInferenceNode(Node):
         cmd.velocity = [0.0] * 24
         cmd.torque = [0.0] * 24
         cmd.feed_forward_torque = [0.0] * 24
-        cmd.stiffness = [50.0] * 24
 
-        cmd.stiffness[4] = 15
-        cmd.stiffness[5] = 15
-        cmd.stiffness[10] = 15
-        cmd.stiffness[11] = 15
+        cmd.stiffness = [70.0, 50.0, 50.0, 70.0, 20.0, 20.0, 
+                         70.0, 50.0, 50.0, 70.0, 20.0, 20.0, 
+                         50.0,
+                         50.0, 50.0, 50.0, 50.0, 50.0,
+                         50.0, 50.0, 50.0, 50.0, 50.0,
+                         50.0 ]
 
-        cmd.damping = [5.0] * 24
+        cmd.damping = [7.0, 5.0, 5.0, 7.0, 0.2, 0.2,
+                       7.0, 5.0, 5.0, 7.0, 0.2, 0.2,
+                       5.0, 
+                       5.0, 5.0, 5.0, 5.0, 5.0, 
+                       5.0, 5.0, 5.0, 5.0, 5.0, 
+                       5.0 ]
+
         cmd.parallel_parser_type = 0
 
         self.pub_cmd.publish(cmd)

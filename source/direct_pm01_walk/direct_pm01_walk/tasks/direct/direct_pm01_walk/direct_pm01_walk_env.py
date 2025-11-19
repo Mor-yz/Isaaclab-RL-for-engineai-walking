@@ -172,7 +172,7 @@ class DirectPm01WalkEnv(DirectRLEnv):
         self.push_force = torch.zeros(self.num_envs, 3, device=self.device)
 
         # 随机推力的范围
-        self.push_force_range = (-50.0, 50.0)       # 牛顿
+        self.push_force_range = (-10.0, 10.0)       # 牛顿
         self.push_interval_range = (1.0, 3.0)         # 两次推力间隔（秒）
         self.push_duration_range = (0.2, 0.6)         # 推力持续时间（秒）
 
@@ -311,6 +311,11 @@ class DirectPm01WalkEnv(DirectRLEnv):
 
         base_quat = self.robot.data.root_quat_w
         base_ang_vel = quat_apply_inverse(base_quat, self.robot.data.root_ang_vel_w)
+
+        noise_std = 1.0   # 噪声标准差，可按需要调整
+        noise = torch.randn_like(base_ang_vel) * noise_std
+        base_ang_vel = base_ang_vel + noise
+
         roll, pitch, yaw = euler_xyz_from_quat(base_quat)
         base_euler_xyz = torch.stack([roll, pitch, yaw], dim=-1)
 
