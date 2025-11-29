@@ -22,7 +22,7 @@ from isaaclab.utils.math import quat_apply_inverse, euler_xyz_from_quat
 from scipy.signal import firwin
 
    
-b = firwin(numtaps=21, cutoff=6.0, fs=200.0, pass_zero="lowpass")
+b = firwin(numtaps=21, cutoff=3.0, fs=200.0, pass_zero="lowpass")
 
 class FIRFilter:
     def __init__(self, b, dim):
