@@ -20,6 +20,7 @@ from direct_pm01_walk.tasks.direct.direct_pm01_walk.rewards.rewards import *
 from isaaclab.utils.math import quat_apply
 from isaaclab.utils.math import quat_rotate_inverse, euler_xyz_from_quat
    
+import direct_pm01_walk.tasks.direct.direct_pm01_walk.rewards.engineai_complete_rewards as rew
 
 
 class DirectPm01WalkEnv(DirectRLEnv):
@@ -217,161 +218,51 @@ class DirectPm01WalkEnv(DirectRLEnv):
     # 头部：j23_head_yaw。
 
     def _get_rewards(self) -> torch.Tensor:
-   
-        l2 = flat_orientation_l2(self)  # 传入 env
-        weight = 1.0
-        print("flat_orientation_l2: %.3f \t weighted: %.3f" % (-l2.mean().item(), -l2.mean().item() * weight))
-        reward = -l2*weight
-
-        penalty = fall_penalty(self)
-        weight = 1.0
-        print("fall_penalty: %.3f \t weighted: %.3f" % (-penalty.mean().item(), -penalty.mean().item() * weight))
-        reward -= penalty * weight
-
-        joint_pos_limits_penalty = joint_pos_limits(self)
-        weight = 0.1
-        print("joint_pos_limits_penalty: %.3f \t weighted: %.3f" % (-joint_pos_limits_penalty.mean().item(), -joint_pos_limits_penalty.mean().item() * weight))
-        reward -= joint_pos_limits_penalty * weight
-
-        joint_torques_penalty = joint_torques_l2(self)
-        weight = 0.01
-        print("joint_torques_penalty: %.3f \t weighted: %.3f" % (-joint_torques_penalty.mean().item(), -joint_torques_penalty.mean().item() * weight))
-        reward -= joint_torques_penalty * weight
-
-        joint_acc_penalty = joint_acc_l2(self)
-        weight = 0.00000001
-        print("joint_acc_penalty: %.3f \t weighted: %.3f" % (-joint_acc_penalty.mean().item(), -joint_acc_penalty.mean().item() * weight))
-        reward -= joint_acc_penalty * weight
-
-        action_rate_penalty = action_rate_l2(self)
-        weight = 0.1
-        print("action_rate_penalty: %.3f \t weighted: %.3f" % (-action_rate_penalty.mean().item(), -action_rate_penalty.mean().item() * weight))
-        reward -= action_rate_penalty * weight
+        # 1. 核心动力项 (权重合计: 4.7)
+        rew_tracking_lin = rew.track_lin_vel_xy_exp(self, sigma=5.0) * 1.4
+        rew_tracking_ang = rew.track_ang_vel_z_exp(self, sigma=5.0) * 1.1
+        rew_ref_pos = rew.dof_ref_pos_diff(self, sigma=0.26) * 2.2
         
-        joint_threashold_reward = joint_angle_threshold_reward(self, ["j03_knee_pitch_l", "j09_knee_pitch_r"], threshold=0.2)
-        weight = 1
-        print("joint_threashold_reward: %.3f \t weighted: %.3f" % (joint_threashold_reward.mean().item(), joint_threashold_reward.mean().item() * weight))
-        reward += joint_threashold_reward * weight
-
-        # action_velocity_continuity_penalty = action_velocity_continuity(self)
-        # weight = 0.01
-        # print("action_velocity_continuity_penalty: %.3f \t weighted: %.3f" % (-action_velocity_continuity_penalty.mean().item(), -action_velocity_continuity_penalty.mean().item() * weight))
-        # reward -= action_velocity_continuity_penalty * weight
-       
-
-        lin_vel_z_penalty = lin_vel_z_l2(self)
-        weight = 10.0
-        print("lin_vel_z_penalty: %.3f \t weighted: %.3f" % (-lin_vel_z_penalty.mean().item(), -lin_vel_z_penalty.mean().item() * weight))
-        reward -= lin_vel_z_penalty * weight
-
-        ang_vel_xy_penalty = ang_vel_xy_l2(self)
-        weight = 0.00
-        print("ang_vel_xy_penalty: %.3f \t weighted: %.3f" % (-ang_vel_xy_penalty.mean().item(), -ang_vel_xy_penalty.mean().item() * weight))
-        reward -= ang_vel_xy_penalty * weight
-
-        gait_phase_reward = get_gait_phase_reward(self)
-        weight = 20 #逐渐调大权重
-        print("gait_phase_reward: %.3f \t weighted: %.3f" % (gait_phase_reward.mean().item(), gait_phase_reward.mean().item() * weight))
-        reward += gait_phase_reward * weight
+        # 2. 姿态与几何项 (权重合计: 3.2)
+        rew_ori = rew.orientation_combined(self) * 1.0
+        rew_height = rew.base_height_dynamic(self, target=0.8132) * 0.2
+        rew_knee_dist = rew.knee_distance_l2(self, target=0.2) * 0.2
+        rew_foot_dist = rew.feet_distance_l2(self, target=0.2) * 0.2
+        rew_base_acc = rew.base_acc_l2(self) * 0.2
+        rew_vel_mismatch = rew.vel_mismatch_exp(self) * 0.5
+        rew_low_speed = rew.low_speed_penalty(self) * 0.2
+        rew_default_pos = rew.default_joint_pos_l2(self) * 0.8
         
-        upper_body_deviation_penalty = joint_deviation_l1(self, 
-                                                         joint_names=["j12_waist_yaw",
-                                                                      "j13_shoulder_pitch_l", "j14_shoulder_roll_l", "j15_shoulder_yaw_l",
-                                                                      "j16_elbow_pitch_l", "j17_elbow_yaw_l",
-                                                                      "j18_shoulder_pitch_r", "j19_shoulder_roll_r", "j20_shoulder_yaw_r",
-                                                                      "j21_elbow_pitch_r", "j22_elbow_yaw_r",
-                                                                      "j23_head_yaw"])
-        weight = 1
-        reward -= upper_body_deviation_penalty * weight
-        print("upper_body_deviation_penalty: %.3f \t weighted: %.3f" % (-upper_body_deviation_penalty.mean().item(), -upper_body_deviation_penalty.mean().item() * weight))
-
-        waist_head_deviation_penalty = joint_deviation_l1(self, 
-                                                         joint_names=["j12_waist_yaw", "j23_head_yaw"])
-        weight = 2.0
-        reward -= waist_head_deviation_penalty * weight
-        print("waist_head_deviation_penalty: %.3f \t weighted: %.3f" % (-waist_head_deviation_penalty.mean().item(), -waist_head_deviation_penalty.mean().item() * weight))
-
-
-        hip_deviation_penalty = joint_deviation_l1(self, joint_names=["j02_hip_yaw_l", "j08_hip_yaw_r", "j01_hip_roll_l", "j07_hip_roll_r"])
-        weight = 1.0
-        reward -= hip_deviation_penalty * weight
-        print("hip_deviation_penalty: %.3f \t weighted: %.3f" % (-hip_deviation_penalty.mean().item(), -hip_deviation_penalty.mean().item() * weight))
-
-        hip_deviation_l2_penalty = joint_deviation_l2(self, joint_names=["j02_hip_yaw_l", "j08_hip_yaw_r", "j01_hip_roll_l", "j07_hip_roll_r"])
-        weight = 10.0
-        reward -= hip_deviation_l2_penalty * weight
-        print("hip_deviation_l2_penalty: %.3f \t weighted: %.3f" % (-hip_deviation_l2_penalty.mean().item(), -hip_deviation_l2_penalty.mean().item() * weight))
-
-        leg_deviation_penalty = joint_deviation_l1(self, 
-                                                   joint_names=["j00_hip_pitch_l", "j06_hip_pitch_r",
-                                                                "j03_knee_pitch_l", "j09_knee_pitch_r",
-                                                                "j04_ankle_pitch_l", "j10_ankle_pitch_r"])
-        weight = 0.001
-        reward -= leg_deviation_penalty * weight
-        print("leg_deviation_penalty: %.3f \t weighted: %.3f" % (-leg_deviation_penalty.mean().item(), -leg_deviation_penalty.mean().item() * weight))
-
-        joint_symmetry_penalty = joint_symmetry_l2(self, 
-                                                   joint_pairs=[
-                                                       ["j00_hip_pitch_l", "j06_hip_pitch_r"],
-                                                       ["j03_knee_pitch_l", "j09_knee_pitch_r"],
-                                                       ["j04_ankle_pitch_l", "j10_ankle_pitch_r"],
-                                                   ])
-        weight = 0.0
-        reward -= joint_symmetry_penalty * weight
-        print("joint_symmetry_penalty: %.3f \t weighted: %.3f" % (-joint_symmetry_penalty.mean().item(), -joint_symmetry_penalty.mean().item() * weight))
-
-        left_leg_sum_penalty = joint_sum_l2(self, joint_names=["j00_hip_pitch_l", "j03_knee_pitch_l", "j04_ankle_pitch_l"])
-        weight = 1
-        reward -= left_leg_sum_penalty * weight
-        print("left_leg_sum_penalty: %.3f \t weighted: %.3f" % (-left_leg_sum_penalty.mean().item(), -left_leg_sum_penalty.mean().item() * weight))
-
-        left_leg_equal_penalty = joint_equal_l2(self, joint_name_a="j00_hip_pitch_l", joint_name_b="j04_ankle_pitch_l")
-        weight = 1
-        reward -= left_leg_equal_penalty * weight
-        print("left_leg_equal_penalty: %.3f \t weighted: %.3f" % (-left_leg_equal_penalty.mean().item(), -left_leg_equal_penalty.mean().item() * weight))
-
-        right_leg_sum_penalty = joint_sum_l2(self, joint_names=["j06_hip_pitch_r", "j09_knee_pitch_r", "j10_ankle_pitch_r"])
-        weight = 1
-        reward -= right_leg_sum_penalty * weight
-        print("right_leg_sum_penalty: %.3f \t weighted: %.3f" % (-right_leg_sum_penalty.mean().item(), -right_leg_sum_penalty.mean().item() * weight))
-
-        right_leg_equal_penalty = joint_equal_l2(self, joint_name_a="j06_hip_pitch_r", joint_name_b="j10_ankle_pitch_r")
-        weight = 1
-        reward -= right_leg_equal_penalty * weight
-        print("right_leg_equal_penalty: %.3f \t weighted: %.3f" % (-right_leg_equal_penalty.mean().item(), -right_leg_equal_penalty.mean().item() * weight))
-
-        #指令跟踪奖励
-        command_lin_vel_reward = command_lin_vel_tracking_reward(self)
-        weight = 3.0
-        reward += command_lin_vel_reward * weight
-        print("command_lin_vel_reward: %.3f \t weighted: %.3f" % (command_lin_vel_reward.mean().item(), command_lin_vel_reward.mean().item() * weight))
-
-        command_ang_vel_reward = command_ang_vel_tracking_reward(self)
-        weight = 0.5
-        reward += command_ang_vel_reward * weight
-        print("command_ang_vel_reward: %.3f \t weighted: %.3f" % (command_ang_vel_reward.mean().item(), command_ang_vel_reward.mean().item() * weight))
+        # 3. 步态质量项 (权重合计: 5.9)
+        rew_air_time = rew.feet_air_time(self) * 1.5
+        rew_contact_num = rew.feet_contact_number(self) * 1.4
+        rew_clearance = rew.feet_clearance(self, target_h=0.1) * 1.6
+        # track_vel_hard 同样权重 0.5，此处复用高斯核
+        rew_track_hard = rew.track_lin_vel_xy_exp(self, sigma=1.0) * 0.5
         
-        
-        #gait_phase_symmetry_rwd = gait_phase_symmetry_reward(self, [['j00_hip_pitch_l', 'j06_hip_pitch_r'],
-        #                                                            ['j13_shoulder_pitch_l', 'j18_shoulder_pitch_r'], 
-        #                                                            ['j03_knee_pitch_l', 'j09_knee_pitch_r'],
-        #                                                             ['j04_ankle_pitch_l', 'j11_ankle_roll_r']])
-        #weight = 0.2
-        #reward += gait_phase_symmetry_rwd * weight
-        #print("gait_phase_symmetry_rwd: %.3f \t weighted: %.3f" % (gait_phase_symmetry_rwd.mean().item(), gait_phase_symmetry_rwd.mean().item() * weight))
-        
-        feet_air_time_biped_reward = feet_air_time_biped(self, ['link_ankle_roll_l', 'link_ankle_roll_r'])
-        weight = 10
-        reward += feet_air_time_biped_reward * weight
-        print("feet_air_time_biped_reward: %.3f \t weighted: %.3f" % (feet_air_time_biped_reward.mean().item(), feet_air_time_biped_reward.mean().item() * weight))
+        # 4. 正则化与惩罚项
+        pen_contact_forces = rew.feet_contact_forces_penalty(self, max_force=500.0) * -0.02
+        pen_foot_slip = rew.foot_slip_penalty(self) * -0.1
+        pen_dof_vel = rew.dof_vel_l2(self) * -1e-5
+        pen_dof_acc = rew.dof_acc_l2(self) * -5e-9
+        pen_action_smooth = rew.action_smoothness_l2(self) * -0.003
+        pen_torques = rew.torques_l2(self) * -1e-10
 
-        print("total reward: %.3f" % reward.mean().item())
-        return reward
+        # 汇总总奖励 (num_envs,)
+        total_reward = (
+            rew_tracking_lin + rew_tracking_ang + rew_ref_pos +
+            rew_ori + rew_height + rew_knee_dist + rew_foot_dist +
+            rew_base_acc + rew_vel_mismatch + rew_low_speed + rew_default_pos +
+            rew_air_time + rew_contact_num + rew_clearance + rew_track_hard +
+            pen_contact_forces + pen_foot_slip + pen_dof_vel + pen_dof_acc + 
+            pen_action_smooth + pen_torques
+        )
+        return total_reward*0.001
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         fallen = self.robot.data.root_pos_w[:, 2] < 0.4
-        l2 = flat_orientation_l2(self)
+        l2 = rew_ori(self)
         tilted = l2 > 0.1   # 阈值可根据实际模型重心调
         done = torch.logical_or(fallen, tilted)
         return done, time_out
